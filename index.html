@@ -257,6 +257,14 @@
   .perr{color:var(--bad);font-size:12.5px;min-height:18px;margin-top:8px;font-family:"Space Mono",monospace}
   .pactions{display:flex;gap:10px;justify-content:center;margin-top:14px}
   .pnote{font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.5}
+  .arow{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:11px 13px;margin-top:8px;flex-wrap:wrap}
+  .arow .an{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:14px;flex:1;min-width:90px}
+  .arow .am{font-family:"Space Mono",monospace;font-size:10px;color:var(--faint);white-space:nowrap}
+  .abtn{font-family:inherit;font-size:11.5px;border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:8px;padding:6px 10px;cursor:pointer;transition:.12s}
+  .abtn:hover{border-color:var(--brand);color:var(--ink)}
+  .abtn.armed{border-color:var(--bad);color:var(--bad)}
+  .aedit{width:100%;display:none;gap:8px;align-items:center;margin-top:4px}
+  .aedit input{flex:1;margin-top:0}
 </style>
 
 <div class="wrap">
@@ -3488,8 +3496,131 @@ function showProfileGate(){
   viewHome();
 }
 
+/* ---------------- Admin panel ---------------- */
+const adminRef=db.collection('admin').doc('config');
+function showAdminGate(){
+  let ov=document.getElementById('profile-overlay');
+  if(!ov){ ov=document.createElement('div'); ov.id='profile-overlay'; document.body.appendChild(ov); }
+  const card=w=>{ ov.innerHTML='<div class="pcard" style="max-width:'+(w||400)+'px"></div>'; return ov.firstChild; };
+  const head='<img class="plogo" src="icon-180.png" alt="">';
+  const exit=()=>{ location.href=location.pathname; };
+
+  function twoStep(btn,label,fn){
+    let armed=false,t=null;
+    btn.onclick=async()=>{
+      if(!armed){ armed=true; btn.textContent='Sure?'; btn.classList.add('armed');
+        t=setTimeout(()=>{armed=false;btn.textContent=label;btn.classList.remove('armed');},3500); return; }
+      clearTimeout(t); btn.disabled=true;
+      try{ await fn(); }catch(e){ btn.disabled=false; btn.textContent='Failed'; }
+    };
+  }
+
+  async function gate(){
+    const c=card();
+    c.innerHTML=head+'<h2>Admin</h2><p class="psub">Checking&hellip;</p>';
+    let snap=null;
+    try{ snap=await adminRef.get(); }
+    catch(e){ c.querySelector('.psub').textContent='Connection problem — refresh to retry.'; return; }
+    if(!snap.exists) setup(); else login();
+  }
+
+  function setup(){
+    const c=card();
+    c.innerHTML=head+'<h2>Set admin passcode</h2><p class="psub">First-time setup &mdash; choose the passcode that opens this panel.</p>'+
+      '<input class="pfield pin" id="apin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••">'+
+      '<div class="perr" id="perr"></div>'+
+      '<div class="pactions"><button class="btn ghost" id="aexit">Cancel</button><button class="btn primary" id="ago">Save</button></div>';
+    c.querySelector('#aexit').onclick=exit;
+    c.querySelector('#ago').onclick=async()=>{
+      const pin=c.querySelector('#apin').value;
+      if(!/^\d{4,8}$/.test(pin)) return c.querySelector('#perr').textContent='Use 4–8 digits.';
+      try{ await adminRef.set({pinHash:pinHash(pin), created:Date.now()}); panel(); }
+      catch(e){ c.querySelector('#perr').textContent='Connection problem — try again.'; }
+    };
+  }
+
+  function login(){
+    const c=card();
+    c.innerHTML=head+'<h2>Admin</h2><p class="psub">Enter the admin passcode.</p>'+
+      '<input class="pfield pin" id="apin" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="••••">'+
+      '<div class="perr" id="perr"></div>'+
+      '<div class="pactions"><button class="btn ghost" id="aexit">Exit</button><button class="btn primary" id="ago">Open</button></div>';
+    const inp=c.querySelector('#apin'); inp.focus();
+    const go=async()=>{
+      try{
+        const snap=await adminRef.get();
+        if(snap.exists && snap.data().pinHash===pinHash(inp.value)) panel();
+        else { c.querySelector('#perr').textContent='Wrong passcode.'; inp.value=''; }
+      }catch(e){ c.querySelector('#perr').textContent='Connection problem — try again.'; }
+    };
+    c.querySelector('#ago').onclick=go;
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter') go(); });
+    c.querySelector('#aexit').onclick=exit;
+  }
+
+  function pinEditor(parent,onSave,ph){
+    const ed=document.createElement('div'); ed.className='aedit';
+    ed.innerHTML='<input class="pfield pin" maxlength="8" inputmode="numeric" autocomplete="off" placeholder="'+ph+'">';
+    const sv=document.createElement('button'); sv.className='abtn'; sv.textContent='Save';
+    const cx=document.createElement('button'); cx.className='abtn'; cx.textContent='Cancel';
+    ed.append(sv,cx); parent.appendChild(ed);
+    cx.onclick=()=>{ ed.style.display='none'; };
+    sv.onclick=async()=>{ const ok=await onSave(ed.querySelector('input').value); if(ok){ ed.style.display='none'; } };
+    return ed;
+  }
+
+  async function panel(){
+    const c=card(560);
+    c.innerHTML=head+'<h2>Profiles</h2><p class="psub">Everyone with an account. Delete asks twice.</p>'+
+      '<div id="alist" style="text-align:left">Loading&hellip;</div>'+
+      '<div class="pactions"><button class="btn ghost" id="aexit">Exit</button><button class="btn" id="akey">Change admin code</button></div>';
+    c.querySelector('#aexit').onclick=exit;
+    const keyEd=pinEditor(c,async v=>{
+      if(!/^\d{4,8}$/.test(v)){ alertRow(c,'Admin code must be 4–8 digits.'); return false; }
+      await adminRef.set({pinHash:pinHash(v), created:Date.now()});
+      alertRow(c,'Admin passcode updated.'); return true;
+    },'new admin code');
+    c.querySelector('#akey').onclick=()=>{ keyEd.style.display='flex'; keyEd.querySelector('input').focus(); };
+
+    function alertRow(cc,msg){ let n=cc.querySelector('.pnote.msg'); if(!n){ n=document.createElement('div'); n.className='pnote msg'; cc.appendChild(n);} n.textContent=msg; }
+
+    const list=c.querySelector('#alist');
+    let snap;
+    try{ snap=await db.collection('users').get(); }
+    catch(e){ list.textContent='Could not load profiles.'; return; }
+    list.innerHTML = snap.docs.length ? '' : '<div class="pnote" style="text-align:center">No profiles yet.</div>';
+    snap.docs.forEach(d=>{
+      const v=d.data();
+      let meta={},seen=0;
+      try{ meta=JSON.parse((v.kv&&v.kv.see_meta)||'{}'); }catch(e){}
+      try{ seen=Object.keys(JSON.parse((v.kv&&v.kv.see_progress2)||'{}')).length; }catch(e){}
+      const row=document.createElement('div'); row.className='arow';
+      const nm=document.createElement('span'); nm.className='an'; nm.textContent=v.name||d.id;
+      const st=document.createElement('span'); st.className='am';
+      st.textContent=seen+' q · streak '+(meta.streak||0)+(v.created?(' · '+new Date(v.created).toLocaleDateString()):'');
+      row.append(nm,st);
+      const bPin=document.createElement('button'); bPin.className='abtn'; bPin.textContent='New code';
+      const bReset=document.createElement('button'); bReset.className='abtn'; bReset.textContent='Reset';
+      const bDel=document.createElement('button'); bDel.className='abtn'; bDel.textContent='Delete';
+      row.append(bPin,bReset,bDel);
+      list.appendChild(row);
+      const ed=pinEditor(row,async val=>{
+        if(!/^\d{4}$/.test(val)){ st.textContent='code must be 4 digits'; return false; }
+        await d.ref.update({pinHash:pinHash(val)});
+        st.textContent='passcode changed ✓'; return true;
+      },'new 4-digit code');
+      bPin.onclick=()=>{ ed.style.display='flex'; ed.querySelector('input').focus(); };
+      twoStep(bReset,'Reset',async()=>{ await d.ref.update({kv:{}}); panel(); });
+      twoStep(bDel,'Delete',async()=>{ await d.ref.delete(); panel(); });
+    });
+  }
+
+  gate();
+}
+
 /* ---------------- Boot ---------------- */
 (async function(){
+  if(new URLSearchParams(location.search).has('admin')) return showAdminGate();
   let last=null;
   try{ last=JSON.parse(localStorage.getItem(LSP+'last')||'null'); }catch(e){}
   if(last && last.name){
