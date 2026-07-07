@@ -442,6 +442,9 @@
   mark{background:rgba(240,168,72,.4);color:var(--ink);border-radius:2px;padding:0 1px}
 </style>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
 <script>
 /* ---------------- Domains ---------------- */
 const DOMAINS = {
@@ -3373,106 +3376,137 @@ document.addEventListener('keydown', e=>{
   }
 });
 
-/* ---------------- User profiles + local storage ---------------- */
-const LSP='see_app_';
-let activeUser=null;
-window.storage={
-  async get(k){ const v=localStorage.getItem(LSP+'u_'+activeUser+'_'+k); return v==null?null:{value:v}; },
-  async set(k,v){ localStorage.setItem(LSP+'u_'+activeUser+'_'+k, v); },
-  async delete(k){ localStorage.removeItem(LSP+'u_'+activeUser+'_'+k); }
+/* ---------------- Cloud profiles (Firebase Firestore) ---------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyB8nUIA5WhthAInls6ZEl-g65RHwLaXUDE",
+  authDomain: "see-practice-engine.firebaseapp.com",
+  projectId: "see-practice-engine",
+  storageBucket: "see-practice-engine.firebasestorage.app",
+  messagingSenderId: "510865343107",
+  appId: "1:510865343107:web:2fb0eeabb51b8dffee91b6"
 };
-function profilesList(){ try{ return JSON.parse(localStorage.getItem(LSP+'profiles'))||[] }catch(e){ return [] } }
-function saveProfilesList(p){ localStorage.setItem(LSP+'profiles', JSON.stringify(p)); }
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+const LSP='see_app_';
+let activeUser=null, activePinHash=null, userDocRef=null;
+let kv={};            // profile data, mirrored to the cloud
+let pushTimer=null, dirty=false;
+
+window.storage={
+  async get(k){ return (k in kv) ? {value:kv[k]} : null; },
+  async set(k,v){ kv[k]=v; cachePut(); schedulePush(); },
+  async delete(k){ delete kv[k]; cachePut(); schedulePush(); }
+};
+const uid = n => n.trim().toLowerCase();
+function cachePut(){ try{ localStorage.setItem(LSP+'cache_'+uid(activeUser), JSON.stringify(kv)); }catch(e){} }
+function pushNow(){
+  if(!userDocRef||!dirty) return;
+  dirty=false;
+  userDocRef.update({kv:kv}).catch(e=>{ dirty=true; });
+}
+function schedulePush(){ dirty=true; clearTimeout(pushTimer); pushTimer=setTimeout(pushNow,800); }
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') pushNow(); });
+window.addEventListener('pagehide',pushNow);
+
 function pinHash(pin){ let h=5381; const str='see#'+pin; for(let i=0;i<str.length;i++) h=((h<<5)+h+str.charCodeAt(i))|0; return String(h); }
 
-async function enterApp(name){
-  activeUser=name;
-  localStorage.setItem(LSP+'last', name);
+async function enterApp(name, ph){
+  activeUser=name; activePinHash=ph;
+  userDocRef=db.collection('users').doc(uid(name));
+  try{ localStorage.setItem(LSP+'last', JSON.stringify({name:name, pinHash:ph})); }catch(e){}
   const ov=document.getElementById('profile-overlay'); if(ov) ov.remove();
   await loadAll();
   renderHome();
   const chip=$('#user-chip');
   $('#user-name').textContent=name;
   chip.style.display='inline-flex';
-  chip.onclick=()=>{ localStorage.removeItem(LSP+'last'); location.reload(); };
+  chip.onclick=()=>{ pushNow(); localStorage.removeItem(LSP+'last'); location.reload(); };
 }
 
 function showProfileGate(){
-  const ov=document.createElement('div'); ov.id='profile-overlay';
-  document.body.appendChild(ov);
+  let ov=document.getElementById('profile-overlay');
+  if(!ov){ ov=document.createElement('div'); ov.id='profile-overlay'; document.body.appendChild(ov); }
   const card=()=>{ ov.innerHTML='<div class="pcard"></div>'; return ov.firstChild; };
+  const head='<img class="plogo" src="icon-180.png" alt="">';
 
-  function viewList(){
+  function viewHome(){
     const c=card();
-    const ps=profilesList();
-    c.innerHTML='<img class="plogo" src="icon-180.png" alt="">'+
-      '<h2>Who\'s studying?</h2><p class="psub">Pick your profile — your progress is saved separately.</p>'+
-      '<div class="plist" id="plist"></div>'+
-      '<div class="pnote">Progress is stored on this device only. Clearing browser data erases it.</div>';
-    const list=c.querySelector('#plist');
-    ps.forEach(p=>{
-      const b=document.createElement('button'); b.className='pbtn';
-      b.innerHTML='<span class="pav">'+p.name.charAt(0).toUpperCase()+'</span>'+p.name;
-      b.onclick=()=>viewPin(p);
-      list.appendChild(b);
-    });
-    const nb=document.createElement('button'); nb.className='pbtn pnew';
-    nb.innerHTML='<span class="pav">+</span>New profile';
-    nb.onclick=viewCreate;
-    list.appendChild(nb);
-    if(ps.length===0) viewCreate();
+    c.innerHTML=head+
+      '<h2>SEE Practice Engine</h2><p class="psub">Your progress is saved online and follows you on any device.</p>'+
+      '<div class="plist">'+
+      '<button class="pbtn" id="p-login"><span class="pav">&#10140;</span>Log in</button>'+
+      '<button class="pbtn pnew" id="p-create"><span class="pav">+</span>Create profile</button>'+
+      '</div>'+
+      '<div class="pnote">One profile per person &mdash; name + 4-digit passcode.</div>';
+    c.querySelector('#p-login').onclick=()=>viewForm(false);
+    c.querySelector('#p-create').onclick=()=>viewForm(true);
   }
 
-  function viewPin(p){
+  function viewForm(isNew){
     const c=card();
-    c.innerHTML='<img class="plogo" src="icon-180.png" alt="">'+
-      '<h2>Hi, '+p.name+'</h2><p class="psub">Enter your 4-digit passcode.</p>'+
-      '<input class="pfield pin" id="pin-in" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="\u2022\u2022\u2022\u2022">'+
+    c.innerHTML=head+
+      '<h2>'+(isNew?'Create profile':'Log in')+'</h2>'+
+      '<p class="psub">'+(isNew?'Choose a name and a 4-digit passcode.':'Enter your name and 4-digit passcode.')+'</p>'+
+      '<input class="pfield" id="pname" maxlength="20" autocomplete="off" placeholder="Your name">'+
+      '<input class="pfield pin" id="ppin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••">'+
       '<div class="perr" id="perr"></div>'+
-      '<div class="pactions"><button class="btn ghost" id="pback">Back</button><button class="btn primary" id="pgo">Open</button></div>';
-    const inp=c.querySelector('#pin-in'); inp.focus();
-    const go=()=>{
-      if(pinHash(inp.value)===p.pin) enterApp(p.name);
-      else { c.querySelector('#perr').textContent='Wrong passcode — try again.'; inp.value=''; inp.focus(); }
-    };
-    c.querySelector('#pgo').onclick=go;
-    inp.addEventListener('keydown',e=>{ if(e.key==='Enter') go(); });
-    c.querySelector('#pback').onclick=viewList;
-  }
-
-  function viewCreate(){
-    const c=card();
-    c.innerHTML='<img class="plogo" src="icon-180.png" alt="">'+
-      '<h2>New profile</h2><p class="psub">Choose a name and a 4-digit passcode.</p>'+
-      '<input class="pfield" id="pname" maxlength="14" autocomplete="off" placeholder="Your name">'+
-      '<input class="pfield pin" id="ppin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="\u2022\u2022\u2022\u2022">'+
-      '<div class="perr" id="perr"></div>'+
-      '<div class="pactions"><button class="btn ghost" id="pback">Back</button><button class="btn primary" id="pmk">Create</button></div>';
+      '<div class="pactions"><button class="btn ghost" id="pback">Back</button>'+
+      '<button class="btn primary" id="pgo">'+(isNew?'Create':'Log in')+'</button></div>';
     const err=m=>{ c.querySelector('#perr').textContent=m; };
+    const btn=c.querySelector('#pgo');
     c.querySelector('#pname').focus();
-    c.querySelector('#pmk').onclick=()=>{
+    btn.onclick=async ()=>{
       const name=c.querySelector('#pname').value.trim();
       const pin=c.querySelector('#ppin').value;
-      const ps=profilesList();
       if(!name) return err('Enter a name.');
-      if(ps.some(p=>p.name.toLowerCase()===name.toLowerCase())) return err('That name is taken on this device.');
       if(!/^\d{4}$/.test(pin)) return err('Passcode must be exactly 4 digits.');
-      ps.push({name, pin:pinHash(pin)});
-      saveProfilesList(ps);
-      enterApp(name);
+      btn.disabled=true; err(isNew?'Creating…':'Checking…');
+      try{
+        const ref=db.collection('users').doc(uid(name));
+        const snap=await ref.get();
+        if(isNew){
+          if(snap.exists){ btn.disabled=false; return err('That name is taken — pick another.'); }
+          kv={};
+          await ref.set({name:name, pinHash:pinHash(pin), kv:{}, created:Date.now()});
+          enterApp(name, pinHash(pin));
+        }else{
+          if(!snap.exists){ btn.disabled=false; return err('No profile with that name.'); }
+          if(snap.data().pinHash!==pinHash(pin)){ btn.disabled=false; return err('Wrong passcode — try again.'); }
+          kv=snap.data().kv||{};
+          enterApp(snap.data().name||name, pinHash(pin));
+        }
+      }catch(e){
+        btn.disabled=false;
+        err('Connection problem — check your internet and try again.');
+      }
     };
-    c.querySelector('#ppin').addEventListener('keydown',e=>{ if(e.key==='Enter') c.querySelector('#pmk').click(); });
-    c.querySelector('#pback').onclick=viewList;
+    c.querySelector('#ppin').addEventListener('keydown',e=>{ if(e.key==='Enter') btn.click(); });
+    c.querySelector('#pback').onclick=viewHome;
   }
 
-  viewList();
+  viewHome();
 }
 
 /* ---------------- Boot ---------------- */
-(function(){
-  const last=localStorage.getItem(LSP+'last');
-  const ps=profilesList();
-  if(last && ps.some(p=>p.name===last)){ enterApp(last); }
-  else showProfileGate();
+(async function(){
+  let last=null;
+  try{ last=JSON.parse(localStorage.getItem(LSP+'last')||'null'); }catch(e){}
+  if(last && last.name){
+    try{
+      const snap=await db.collection('users').doc(uid(last.name)).get();
+      if(snap.exists && snap.data().pinHash===last.pinHash){
+        kv=snap.data().kv||{};
+        return enterApp(snap.data().name||last.name, last.pinHash);
+      }
+    }catch(e){
+      // offline: fall back to last cached copy so the app still opens
+      try{
+        const c=localStorage.getItem(LSP+'cache_'+uid(last.name));
+        if(c){ kv=JSON.parse(c); return enterApp(last.name, last.pinHash); }
+      }catch(_){}
+    }
+  }
+  showProfileGate();
 })();
 </script>
